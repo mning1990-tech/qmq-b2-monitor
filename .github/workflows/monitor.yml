@@ -49,3 +49,4 @@ jobs:
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python monitor.py --status
 # Schedule re-registration trigger
+# Last updated: 2026-08-12T11:32Z - force schedule re-registration
