@@ -2,15 +2,18 @@ name: B2 Visa Monitor
 
 on:
   schedule:
-    # 监控：每5分钟检查一次（GitHub Actions 对 */5 间隔支持最稳定）
-    - cron: '*/5 * * * *'
-    # 状态报告：每3小时整点（北京时间0/3/6/9/12/15/18/21点 = UTC 16/19/22/1/4/7/10/13点）
+    # 监控：每5分钟（使用非零偏移避免高负载时段）
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+    # 状态报告：每3小时（北京时间0/3/6/9/12/15/18/21点 = UTC 16/19/22/1/4/7/10/13点）
     - cron: '0 1,4,7,10,13,16,19,22 * * *'
-  # 支持手动触发
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -48,5 +51,3 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python monitor.py --status
-# Schedule re-registration trigger
-# Last updated: 2026-08-12T11:32Z - force schedule re-registration
