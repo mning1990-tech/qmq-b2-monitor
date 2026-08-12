@@ -48,3 +48,4 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python monitor.py --status
+# Schedule re-registration trigger
