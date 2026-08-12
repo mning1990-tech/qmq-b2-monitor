@@ -2,10 +2,15 @@ name: B2 Visa Monitor
 
 on:
   schedule:
-    # 每5分钟运行一次（GitHub Actions cron 实际运行频率可能略有延迟）
+    # 监控：每5分钟检查一次（GitHub Actions 对 */5 间隔支持最稳定）
     - cron: '*/5 * * * *'
+    # 状态报告：每3小时整点（北京时间0/3/6/9/12/15/18/21点 = UTC 16/19/22/1/4/7/10/13点）
+    - cron: '0 1,4,7,10,13,16,19,22 * * *'
   # 支持手动触发
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   check:
@@ -19,9 +24,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run Monitor
+      - name: Run Monitor (5min check)
+        if: github.event.schedule != '0 1,4,7,10,13,16,19,22 * * *'
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python monitor.py
+
+      - name: Commit notified state
+        if: always() && github.event.schedule != '0 1,4,7,10,13,16,19,22 * * *'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add notified_state.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update notified dates state [skip ci]"
+          git push || true
+
+      - name: Run Status Report (3hour)
+        if: github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *' || github.event_name == 'workflow_dispatch'
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: python monitor.py --status
