@@ -1,0 +1,27 @@
+name: B2 Visa Monitor
+
+on:
+  schedule:
+    # 每5分钟运行一次（GitHub Actions cron 实际运行频率可能略有延迟）
+    - cron: '*/5 * * * *'
+  # 支持手动触发
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Monitor
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: python monitor.py
