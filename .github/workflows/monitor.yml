@@ -45,7 +45,7 @@ jobs:
           git push || true
 
       - name: Run Status Report (3hour)
-        if: github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *'
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
