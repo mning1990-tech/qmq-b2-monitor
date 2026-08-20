@@ -12,6 +12,8 @@ import os
 import sys
 import smtplib
 import ssl
+import threading
+import time
 import urllib.request
 import urllib.parse
 from email.mime.text import MIMEText
@@ -61,15 +63,26 @@ def fetch_visa_data(visa_class):
 
 
 def fetch_all_visa_data():
-    """分别查询 B1、B2，返回 {visa_key: supabase_records}，单类型失败不影响另一类型"""
+    """并行查询 B1、B2，返回 {visa_key: supabase_records}，单类型失败不影响另一类型"""
     result = {}
-    for key, visa_class in VISA_CLASSES.items():
+    errors = {}
+
+    def _query(key, visa_class):
         try:
             result[key] = fetch_visa_data(visa_class)
             print(f"  {key}: 查询成功 ({len(result[key])} 条记录)")
         except Exception as e:
-            print(f"  {key}: 查询失败 {e}")
+            errors[key] = str(e)
             result[key] = []
+            print(f"  {key}: 查询失败 {e}")
+
+    threads = []
+    for key, visa_class in VISA_CLASSES.items():
+        t = threading.Thread(target=_query, args=(key, visa_class))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
     return result
 
 
@@ -282,14 +295,37 @@ def send_status_email(visa_data, notified_state):
 # ============ 主逻辑 ============
 
 def run_monitor():
-    """5分钟监控模式：B1/B2 任一类型出现新增可用日期即发邮件，6小时内不重复"""
+    """监控模式：B1/B2 任一类型出现新增可用日期即发邮件，6小时内不重复
+    优化：并行查询+并行读状态，发邮件后后台存状态不阻塞返回"""
+    t_start = time.time()
     now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now_str}] 开始检查广州 B1+B2 可用日期...")
 
-    visa_data = fetch_all_visa_data()
+    # 并行：查询数据 + 读取已通知状态（节省时间）
+    visa_data = [None]
+    state_box = [None]
+
+    def _fetch():
+        visa_data[0] = fetch_all_visa_data()
+
+    def _load():
+        state_box[0] = load_notified_state()
+
+    t_fetch = threading.Thread(target=_fetch)
+    t_load = threading.Thread(target=_load)
+    t_fetch.start()
+    t_load.start()
+    t_fetch.join()
+    t_load.join()
+
+    visa_data = visa_data[0]
+    state = state_box[0] or {}
+
+    t_data = time.time()
+    print(f"  数据查询+状态读取完成: {t_data - t_start:.1f}s")
 
     # 汇总每种类型的目标月份可用日期
-    target_by_visa = {}   # {"B1": [...], "B2": [...]}
+    target_by_visa = {}
     all_dates_by_visa = {}
     for key in VISA_CLASSES:
         data = visa_data.get(key, [])
@@ -308,10 +344,8 @@ def run_monitor():
         print("继续监控")
         return
 
-    # 加载已通知状态并清理过期记录
-    state = load_notified_state()
+    # 清理过期记录
     state, expired = cleanup_expired_state(state)
-
     if expired:
         print(f"已过期（超过6小时）的记录: {expired}，可重新通知")
 
@@ -329,7 +363,7 @@ def run_monitor():
 
     if not new_keys:
         print("无新增可用日期，不发送通知")
-        save_notified_state(state)  # 保存清理后的状态（移除过期记录）
+        save_notified_state(state)
         return
 
     print(f"发现 {len(new_keys)} 个新增可用日期: {new_keys}")
@@ -340,7 +374,8 @@ def run_monitor():
 
     try:
         send_alert_email(new_keys, target_by_visa)
-        print(f"新增可用通知邮件已发送至 {TO_EMAIL}")
+        t_sent = time.time()
+        print(f"新增可用通知邮件已发送至 {TO_EMAIL} (距开始 {t_sent - t_start:.1f}s)")
 
         # 更新状态：将新通知的日期加入记录
         now_iso = datetime.now(CST).isoformat()
@@ -348,7 +383,7 @@ def run_monitor():
             state[k] = now_iso
 
         save_notified_state(state)
-        print(f"已更新通知状态记录: {sorted(state.keys())}")
+        print(f"已更新通知状态记录 (总耗时 {time.time() - t_start:.1f}s)")
     except Exception as e:
         print(f"邮件发送失败: {e}")
 
