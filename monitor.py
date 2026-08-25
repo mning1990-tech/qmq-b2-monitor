@@ -7,6 +7,9 @@ QMQ 广州 B1+B2 美签可用性监控脚本
 - 每3小时整点触发状态报告，发送当前所有可用日期，确认监控正常运行。
 """
 
+import base64
+import hmac
+import hashlib
 import json
 import os
 import sys
@@ -21,9 +24,18 @@ from email.utils import formataddr
 from datetime import datetime, timezone, timedelta
 
 # ============ 配置 ============
-SUPABASE_URL = "https://sdetncywjtheyqwfzshc.supabase.co/rest/v1/slot_data"
+# qmq.app 使用 Supabase Edge Function cal-view 端点（加密返回全部城市/签证类型数据）
+CAL_VIEW_URL = "https://sdetncywjtheyqwfzshc.supabase.co/functions/v1/cal-view"
 SUPABASE_KEY = "sb_publishable_lq9TdbQ0wW1tgbKmYyPXsA_YilcZ8an"
 CITY_KEY = "cnGUA"  # 广州
+
+# 解密配置（从 qmq.app JS bundle 提取）
+SEED_A = "qmq.cal"
+SEED_B = "view.v8.codec"
+HMAC_KEY = f"{SEED_A}.{SEED_B}"  # "qmq.cal.view.v8.codec"
+FIELD_MAP = {"ver": "a", "nonce": "b", "data": "c", "ts": "e"}
+ROW_KEYS = {"data": "d", "updated_at": "u", "city_key": "c", "visa_class": "k"}
+ROWS_KEY = "r"
 
 # B1 和 B2 两种签证类型（key 用于状态记录区分）
 VISA_CLASSES = {
@@ -44,45 +56,93 @@ NOTIFY_COOLDOWN_HOURS = 6  # 已通知日期的冷却时间，超过后可再次
 CST = timezone(timedelta(hours=8))
 
 
-# ============ 数据获取 ============
+# ============ 数据获取（cal-view Edge Function + 解密） ============
 
-def fetch_visa_data(visa_class):
-    """查询 Supabase API 获取指定签证类型在广州的可用日期数据"""
-    params = urllib.parse.urlencode({
-        "select": "data",
-        "city_key": f"eq.{CITY_KEY}",
-        "visa_class": f"eq.{visa_class}",
-    })
-    url = f"{SUPABASE_URL}?{params}"
-    req = urllib.request.Request(url)
+def _base64_decode(data_str):
+    """WR(e): base64 解码为 bytes（自动补齐 padding）"""
+    s = data_str
+    pad = len(s) % 4
+    if pad:
+        s += "=" * (4 - pad)
+    return base64.b64decode(s)
+
+
+def _generate_keystream(nonce, timestamp, version, length):
+    """LW(nonce, ts, ver, length): 用 HMAC-SHA256 生成密钥流
+
+    密钥 = "qmq.cal.view.v8.codec"
+    消息 = "{nonce}:{timestamp}:{version}:{counter}"，counter 从 0 递增
+    拼接各次 HMAC 输出（每次32字节）直到达到所需长度。
+    """
+    key = HMAC_KEY.encode("utf-8")
+    result = b""
+    counter = 0
+    while len(result) < length:
+        message = f"{nonce}:{timestamp}:{version}:{counter}".encode("utf-8")
+        h = hmac.new(key, message, hashlib.sha256).digest()
+        result += h
+        counter += 1
+    return result[:length]
+
+
+def _decrypt_response(resp):
+    """FW(e): 解密 cal-view 响应，提取行数据
+
+    返回 list of {data, updated_at, city_key, visa_class}
+    """
+    f = FIELD_MAP
+    nonce = resp[f["nonce"]]       # resp["b"]
+    timestamp = resp[f["ts"]]      # resp["e"]
+    version = resp[f["ver"]]       # resp["a"]
+    ciphertext = _base64_decode(resp[f["data"]])  # resp["c"]
+
+    keystream = _generate_keystream(nonce, timestamp, version, len(ciphertext))
+
+    # XOR 解密
+    plaintext = bytes(c ^ k for c, k in zip(ciphertext, keystream))
+
+    # 解析 JSON
+    data = json.loads(plaintext.decode("utf-8"))
+
+    # 提取行数据
+    rows_raw = data.get(ROWS_KEY, [])  # data["r"]
+    rows = []
+    for row in rows_raw:
+        rows.append({
+            "data": row.get(ROW_KEYS["data"]),           # row["d"]
+            "updated_at": row.get(ROW_KEYS["updated_at"]),  # row["u"]
+            "city_key": row.get(ROW_KEYS["city_key"]),      # row["c"]
+            "visa_class": row.get(ROW_KEYS["visa_class"]),   # row["k"]
+        })
+    return rows
+
+
+def fetch_all_visa_data():
+    """从 cal-view Edge Function 获取全部数据，解密后按签证类型筛选广州数据
+    返回 {visa_key: [records]}，每条 record 包含 data/slots 等字段"""
+    req = urllib.request.Request(CAL_VIEW_URL, method="GET")
     req.add_header("apikey", SUPABASE_KEY)
     req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
 
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        encrypted = json.loads(resp.read().decode("utf-8"))
 
+    # 解密
+    all_rows = _decrypt_response(encrypted)
 
-def fetch_all_visa_data():
-    """并行查询 B1、B2，返回 {visa_key: supabase_records}，单类型失败不影响另一类型"""
+    # 按城市和签证类型筛选
     result = {}
-    errors = {}
-
-    def _query(key, visa_class):
-        try:
-            result[key] = fetch_visa_data(visa_class)
-            print(f"  {key}: 查询成功 ({len(result[key])} 条记录)")
-        except Exception as e:
-            errors[key] = str(e)
-            result[key] = []
-            print(f"  {key}: 查询失败 {e}")
-
-    threads = []
     for key, visa_class in VISA_CLASSES.items():
-        t = threading.Thread(target=_query, args=(key, visa_class))
-        t.start()
-        threads.append(t)
-    for t in threads:
-        t.join()
+        result[key] = [
+            row for row in all_rows
+            if row.get("city_key") == CITY_KEY
+            and row.get("visa_class") == visa_class
+        ]
+        if result[key]:
+            print(f"  {key}: 查询成功 ({len(result[key])} 条记录)")
+        else:
+            print(f"  {key}: 无匹配记录")
+
     return result
 
 
@@ -90,7 +150,9 @@ def get_all_dates(data):
     """获取某类型所有可用日期（不限月份）"""
     all_dates = []
     for record in data:
-        slots = record.get("data", {}).get("slots", {})
+        slots = record.get("data", {})
+        if isinstance(slots, dict):
+            slots = slots.get("slots", {})
         all_dates.extend(slots.keys())
     return sorted(set(all_dates))
 
@@ -102,11 +164,23 @@ def get_target_dates(data):
 
 
 def get_data_timestamp(data):
-    """获取数据更新时间戳"""
+    """获取数据更新时间（优先 updated_at 字段，其次 data.timestamp）"""
     for record in data:
+        updated = record.get("updated_at")
+        if updated:
+            try:
+                dt = datetime.fromisoformat(updated)
+                return dt.astimezone(CST)
+            except Exception:
+                pass
         ts = record.get("data", {}).get("timestamp", 0)
+        if isinstance(ts, dict):
+            ts = 0
         if ts:
-            return datetime.fromtimestamp(ts, tz=CST)
+            try:
+                return datetime.fromtimestamp(float(ts), tz=CST)
+            except Exception:
+                pass
     return None
 
 
@@ -277,6 +351,7 @@ def send_status_email(visa_data, notified_state):
         f"----------------------------------------\n"
         f"网站链接：https://qmq.app/\n"
         f"运行频率：监控每5分钟，状态报告每3小时\n"
+        f"数据源：qmq.app cal-view Edge Function（加密传输）\n"
         f"通知策略：仅对新增可用日期发邮件，已通知的日期6小时内不重复\n"
         f"本邮件由监控系统自动发送。\n"
     )
