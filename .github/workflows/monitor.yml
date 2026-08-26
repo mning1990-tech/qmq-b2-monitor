@@ -1,11 +1,14 @@
 name: B2 Visa Monitor
 
+# 2026-08-26: qmq.app 已封锁数据中心 IP（GitHub Actions 的 Azure IP 返回 403
+# "禁止恶意爬取qmq的数据"），云端监控彻底无法获取数据，暂停全部定时任务。
+# 如日后恢复（站长度量或更换数据通道），取消下方 schedule 注释即可。
 on:
-  schedule:
-    # 监控：每5分钟（使用非零偏移避免高负载时段）
-    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
-    # 状态报告：每3小时（北京时间0/3/6/9/12/15/18/21点 = UTC 16/19/22/1/4/7/10/13点）
-    - cron: '0 1,4,7,10,13,16,19,22 * * *'
+  # schedule:
+  #   # 监控：每5分钟（使用非零偏移避免高负载时段）
+  #   - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+  #   # 状态报告：每3小时（北京时间0/3/6/9/12/15/18/21点 = UTC 16/19/22/1/4/7/10/13点）
+  #   - cron: '0 1,4,7,10,13,16,19,22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -28,7 +31,7 @@ jobs:
           python-version: '3.11'
 
       - name: Run Monitor (5min check)
-        if: github.event.schedule != '0 1,4,7,10,13,16,19,22 * * *'
+        if: github.event_name == 'workflow_dispatch'
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
@@ -36,7 +39,7 @@ jobs:
         run: python monitor.py
 
       - name: Commit notified state
-        if: always() && github.event.schedule != '0 1,4,7,10,13,16,19,22 * * *'
+        if: always() && github.event_name == 'workflow_dispatch'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -45,7 +48,7 @@ jobs:
           git push || true
 
       - name: Run Status Report (3hour)
-        if: github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *'
+        if: github.event_name == 'manual-status'
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
