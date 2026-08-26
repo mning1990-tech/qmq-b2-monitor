@@ -381,7 +381,11 @@ def run_monitor():
     state_box = [None]
 
     def _fetch():
-        visa_data[0] = fetch_all_visa_data()
+        try:
+            visa_data[0] = fetch_all_visa_data()
+        except Exception as e:
+            print(f"  数据查询失败: {e}")
+            visa_data[0] = {}
 
     def _load():
         state_box[0] = load_notified_state()
@@ -468,7 +472,13 @@ def run_status():
     now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now_str}] 发送3小时固定状态报告...")
 
-    visa_data = fetch_all_visa_data()
+    fetch_error = ""
+    try:
+        visa_data = fetch_all_visa_data()
+    except Exception as e:
+        fetch_error = str(e)
+        print(f"API 请求失败: {fetch_error}")
+        visa_data = {}
 
     # 若全部类型都查询失败，则发一封异常说明邮件
     if not any(visa_data.values()):
@@ -480,6 +490,8 @@ def run_status():
                     f"云端监控状态报告\n\n"
                     f"发送时间：{now_str2}\n"
                     f"状态：B1/B2 API 请求均失败\n"
+                    f"错误信息：{fetch_error or '返回数据为空（无匹配记录）'}\n"
+                    f"常见原因：qmq.app 封锁了数据中心 IP（403 禁止爬取）或数据结构变更。\n"
                     f"请检查运行日志。\n"
                 )
                 msg = MIMEText(body, "plain", "utf-8")
